@@ -29,6 +29,7 @@ This project is a hands-on walkthrough of the concepts below — each one is exe
 - **Spark Structured Streaming** with `foreachBatch`, dynamic topic discovery (`subscribePattern`), and per-batch schema refresh on decode failure ([spark-jobs/05](spark-jobs/05_native_avro_per_topic.py), [spark-jobs/06](spark-jobs/06_delta_write.py)).
 - **Lakehouse table design**: an append-only raw event log per table, plus a deduplicated "current state" table built with a Delta `MERGE` keyed on Postgres LSN ordering ([spark-jobs/06](spark-jobs/06_delta_write.py), [spark-jobs/07](spark-jobs/07_backfill_current_tables.py)).
 - **Delta Lake liquid clustering** (`CLUSTER BY`), declared at table-creation time rather than retrofitted, plus `OPTIMIZE` for file compaction ([spark-jobs/08](spark-jobs/08_optimize_tables.py), [spark-jobs/08a](spark-jobs/08a_enable_clustering.py)).
+- **Delta Lake deletion vectors** (`delta.enableDeletionVectors`) on the `*_current` tables ([spark-jobs/09](spark-jobs/09_test.py)) — normally a Delta delete/update rewrites every data file containing an affected row (copy-on-write). With deletion vectors enabled, a delete is instead recorded as a soft-delete marker alongside the existing file (merge-on-read), so readers reconcile the marker at query time instead of the writer paying a full file rewrite — much cheaper for the frequent per-row deletes the `MERGE` in [spark-jobs/06](spark-jobs/06_delta_write.py) issues on `op = 'd'`.
 - **Lakehouse federation**: MinIO as S3-compatible object storage, Hive Metastore as the shared catalog, and Trino as a SQL query engine sitting on top of the same Delta tables Spark wrote — all without copying data.
 
 ## Architecture
@@ -233,7 +234,7 @@ The jobs in `spark-jobs/` are numbered as a learning progression, not a pipeline
 | `07_backfill_current_tables.py` | Rebuilds all `*_current` tables from scratch by reading the full raw event log — useful after schema changes or to backfill history the streaming job missed. Discovers tables dynamically from the Hive Metastore rather than a hardcoded list. |
 | `08_optimize_tables.py` | Runs `OPTIMIZE` on every `*_current` table, which applies the liquid clustering declared at creation — no need to restate clustering columns. |
 | `08a_enable_clustering.py` | Retrofits `CLUSTER BY` onto existing tables via `ALTER TABLE` — kept as a one-off/reference, since the in-code comments note this path proved less reliable than declaring clustering at `CREATE TABLE` time. |
-| `09_test.py` | Scratch/debug script for inspecting clustering state via `DESCRIBE DETAIL` — not part of the pipeline. |
+| `09_test.py` | Scratch/debug script for inspecting clustering state via `DESCRIBE DETAIL`. Also holds the (commented-out, run-once) `ALTER TABLE ... SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true')` used to enable deletion vectors on the `*_current` tables — not part of the streaming pipeline itself. |
 
 ## Running Ad-Hoc Jobs
 
@@ -281,6 +282,8 @@ Three CDC-tracked tables flow through the pipeline, each producing **two** Delta
 | `customers_current` | `id` |
 | `orders_current` | `customer_id` |
 | `order_items_current` | `order_id` |
+
+All three `*_current` tables also have `delta.enableDeletionVectors = true` set ([spark-jobs/09_test.py](spark-jobs/09_test.py)). The `MERGE` in [spark-jobs/06_delta_write.py](spark-jobs/06_delta_write.py) issues a real row delete (`whenMatchedDelete`) whenever `op = 'd'` arrives — without deletion vectors, Delta would have to rewrite every Parquet file containing that row (copy-on-write). With deletion vectors on, the delete is instead persisted as a soft-delete marker next to the existing file (merge-on-read: readers filter out marked rows at query time), which is far cheaper for the steady trickle of small, individual deletes this pipeline produces.
 
 ## Ports Reference
 
